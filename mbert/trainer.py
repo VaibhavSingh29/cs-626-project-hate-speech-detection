@@ -63,6 +63,7 @@ class Preprocessor():
         else:
             encoded_data_X['rationales'] = torch.tensor(
                 df['rationales'][:, :self.token_length])
+        # print(encoded_data_X['rationales'].shape)
         return encoded_data_X, data_Y
 
     def process_one(self, sentence):
@@ -88,6 +89,20 @@ class CustomDataLoaderWithAttention():
     def __call__(self, data_X, data_Y):
         data = TensorDataset(data_X['input_ids'],
                              data_X['attention_mask'], data_X['rationales'], data_Y)
+        dataloader = DataLoader(
+            dataset=data, batch_size=self.batch_size, shuffle=True)
+        return dataloader
+
+    def combine(self, en_X, en_Y, hi_X, hi_Y):
+        #print(en_X['input_ids'].shape, hi_X['input_ids'].shape)
+        #print(en_X['attention_mask'].shape, hi_X['attention_mask'].shape)
+        #print(en_X['rationales'].shape, hi_X['rationales'].shape)
+        data = TensorDataset(
+            torch.concat((en_X['input_ids'], hi_X['input_ids'])),
+            torch.concat((en_X['attention_mask'], hi_X['attention_mask'])),
+            torch.concat((en_X['rationales'], hi_X['rationales'])),
+            torch.concat((en_Y, hi_Y))
+        )
         dataloader = DataLoader(
             dataset=data, batch_size=self.batch_size, shuffle=True)
         return dataloader
@@ -146,8 +161,8 @@ class Classifier(nn.Module):
 
                 # forward pass
                 output = self.forward(input_ids, attention_mask)
-                print(output.attentions[-1][:, 0, 0, :])
-                print(rationales)
+                #print(output.attentions[-1][:, 0, 0, :])
+                # print(rationales)
 
                 loss = criterion(output.logits.type(
                     torch.FloatTensor), labels.type(torch.FloatTensor)
@@ -205,6 +220,8 @@ class Classifier(nn.Module):
 
 def save_model(model, checkpoint, accuracy):
     PATH = '../saved_models/'
+    if not os.path.exists(PATH):
+        os.mkdir('../saved_models')
     filename = checkpoint+"-"+str(round(accuracy, 2))+".pt"
     torch.save(model.state_dict(), os.path.join(PATH, filename))
 
@@ -236,9 +253,11 @@ def main():
     en_train['post_tokens'] = en_train['post_tokens'][:i]
     en_train['rationales'] = en_train['rationales'][:i]
     hi_train['post_tokens'] = hi_train['post_tokens'][:i]
-    hi_train['rationales'] = hi_train['rationales'][:i]
+    hi_train['rationales'] = torch.squeeze(hi_train['rationales'][:i])
     en_dev['post_tokens'] = en_dev['post_tokens'][:i]
     hi_dev['post_tokens'] = hi_dev['post_tokens'][:i]
+
+    # print(hi_train['rationales'][:i].shape)
 
     en_train['label'] = en_train['label'][:i]
     hi_train['label'] = hi_train['label'][:i]
@@ -252,8 +271,9 @@ def main():
     hi_dev_X, hi_dev_Y = preprocessor(hi_dev)
 
     dataloader = CustomDataLoaderWithAttention(hparams['batch_size'])
-    en_train_loader = dataloader(en_train_X, en_train_Y)
-    hi_train_loader = dataloader(hi_train_X, hi_train_Y)
+    en_train_loader = dataloader.combine(
+        en_train_X, en_train_Y, hi_train_X, hi_train_Y)
+    # hi_train_loader = dataloader(hi_train_X, hi_train_Y)
 
     dataloader = CustomDataLoader(hparams['batch_size'])
     en_dev_loader = dataloader(en_dev_X, en_dev_Y)
