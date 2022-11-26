@@ -12,6 +12,8 @@ from sklearn.utils import class_weight
 import pickle
 logging.set_verbosity_error()
 
+torch.manual_seed(42)
+
 if torch.cuda.is_available():
     DEVICE = torch.device("cuda")
     print('GPU:', torch.cuda.get_device_name(0))
@@ -55,7 +57,12 @@ class Preprocessor():
             encoded_data_X['input_ids'], dim=0)
         encoded_data_X['attention_mask'] = torch.cat(
             encoded_data_X['attention_mask'], dim=0)
-
+        if torch.is_tensor(df['label']):
+            encoded_data_X['rationales'] = df['rationales'][:,
+                                                            :self.token_length]
+        else:
+            encoded_data_X['rationales'] = torch.tensor(
+                df['rationales'][:, :self.token_length])
         return encoded_data_X, data_Y
 
     def process_one(self, sentence):
@@ -74,6 +81,18 @@ class Preprocessor():
 # class dataloader
 
 
+class CustomDataLoaderWithAttention():
+    def __init__(self, batch_size):
+        self.batch_size = batch_size
+
+    def __call__(self, data_X, data_Y):
+        data = TensorDataset(data_X['input_ids'],
+                             data_X['attention_mask'], data_X['rationales'], data_Y)
+        dataloader = DataLoader(
+            dataset=data, batch_size=self.batch_size, shuffle=True)
+        return dataloader
+
+
 class CustomDataLoader():
     def __init__(self, batch_size):
         self.batch_size = batch_size
@@ -85,8 +104,8 @@ class CustomDataLoader():
             dataset=data, batch_size=self.batch_size, shuffle=True)
         return dataloader
 
-# class model -> model, backward, forward, optimizer, bleh bluh
 
+# class model -> model, backward, forward, optimizer, bleh bluh
 
 class Classifier(nn.Module):
     def __init__(self, checkpoint):
@@ -94,7 +113,7 @@ class Classifier(nn.Module):
         self.model = BertForSequenceClassification.from_pretrained(
             checkpoint,
             num_labels=3,
-            output_attentions=False,
+            output_attentions=True,
             output_hidden_states=False,
         )
         torch.cuda.empty_cache()
@@ -119,14 +138,23 @@ class Classifier(nn.Module):
         )
 
         for epoch in range(hparams['epochs']):
-            for i, (input_ids, attention_mask, labels) in enumerate(tqdm(train_loader, desc="minibatches trained on")):
+            for i, (input_ids, attention_mask, rationales, labels) in enumerate(tqdm(train_loader, desc="minibatches trained on")):
                 input_ids = input_ids.to(DEVICE)
                 attention_mask = attention_mask.to(DEVICE)
+                rationales = rationales.to(DEVICE)
                 labels = labels.type(torch.LongTensor).to(DEVICE)
 
                 # forward pass
                 output = self.forward(input_ids, attention_mask)
-                loss = criterion(output.logits, labels)
+                print(output.attentions[-1][:, 0, 0, :])
+                print(rationales)
+
+                loss = criterion(output.logits.type(
+                    torch.FloatTensor), labels.type(torch.FloatTensor)
+                ) + hparams['lambda'] * criterion(
+                    output.attentions[-1][:, 0, 0, :],
+                    rationales
+                )
 
                 # backward pass
                 optimizer.zero_grad()
@@ -149,12 +177,13 @@ class Classifier(nn.Module):
 
                 output = self.forward(input_ids, attention_mask)
                 predictions = torch.argmax(output.logits, dim=1)
+                labels = torch.argmax(labels, dim=1)
                 samples += input_ids.shape[0]
                 classified_correct += (predictions ==
                                        labels).sum().item()
 
             accuracy = 100.00 * classified_correct / samples
-            print(f'accuracy = {accuracy:.4f}')
+            print(f'accuracy = {accuracy:.3f}')
             return accuracy
 
     def predict(self, input_ids, attention_mask):
@@ -184,12 +213,13 @@ def main():
 
     # hyperparameters
     hparams = {}
-    hparams['epochs'] = 2
-    hparams['batch_size'] = 64
+    hparams['epochs'] = 10
+    hparams['batch_size'] = 2
     hparams['lr'] = 3e-5
     hparams['beta_1'] = 0.9
     hparams['beta_2'] = 0.999
-    hparams['token_length'] = 200
+    hparams['token_length'] = 6
+    hparams['lambda'] = 0.001
 
     checkpoint = 'bert-base-uncased'  # 'bert-base-multilingual-cased'
 
@@ -201,22 +231,37 @@ def main():
     hi_test = pickle.load(open('../data/hi_test.p', 'rb'))
 
     preprocessor = Preprocessor(checkpoint, hparams['token_length'])
+
+    i = 10
+    en_train['post_tokens'] = en_train['post_tokens'][:i]
+    en_train['rationales'] = en_train['rationales'][:i]
+    hi_train['post_tokens'] = hi_train['post_tokens'][:i]
+    hi_train['rationales'] = hi_train['rationales'][:i]
+    en_dev['post_tokens'] = en_dev['post_tokens'][:i]
+    hi_dev['post_tokens'] = hi_dev['post_tokens'][:i]
+
+    en_train['label'] = en_train['label'][:i]
+    hi_train['label'] = hi_train['label'][:i]
+    en_dev['label'] = en_dev['label'][:i]
+    hi_dev['label'] = hi_dev['label'][:i]
+
     en_train_X, en_train_Y = preprocessor(en_train)
     en_dev_X, en_dev_Y = preprocessor(en_dev)
 
     hi_train_X, hi_train_Y = preprocessor(hi_train)
     hi_dev_X, hi_dev_Y = preprocessor(hi_dev)
 
-    dataloader = CustomDataLoader(hparams['batch_size'])
+    dataloader = CustomDataLoaderWithAttention(hparams['batch_size'])
     en_train_loader = dataloader(en_train_X, en_train_Y)
-    en_dev_loader = dataloader(en_dev_X, en_dev_Y)
-
     hi_train_loader = dataloader(hi_train_X, hi_train_Y)
+
+    dataloader = CustomDataLoader(hparams['batch_size'])
+    en_dev_loader = dataloader(en_dev_X, en_dev_Y)
     hi_dev_loader = dataloader(hi_dev_X, hi_dev_Y)
 
     mbert = Classifier(checkpoint)
     mbert.train(en_train_loader, hparams)
-    mbert.train(hi_train_loader, hparams)
+    # mbert.train(hi_train_loader, hparams)
     accuracy = mbert.test(en_dev_loader)
     accuracy = mbert.test(hi_dev_loader)
     save_model(mbert, checkpoint, accuracy)
