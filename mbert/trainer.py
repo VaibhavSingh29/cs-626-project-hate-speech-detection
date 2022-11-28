@@ -238,7 +238,7 @@ def main():
     hparams['token_length'] = 6
     hparams['lambda'] = 0.001
 
-    checkpoint = 'bert-base-uncased'  # 'bert-base-multilingual-cased'
+    checkpoint = 'bert-base-multilingual-cased'
 
     en_train = pickle.load(open('../data/en_train.p', 'rb'))
     en_dev = pickle.load(open('../data/en_validation.p', 'rb'))
@@ -249,21 +249,8 @@ def main():
 
     preprocessor = Preprocessor(checkpoint, hparams['token_length'])
 
-    i = 10
-    en_train['post_tokens'] = en_train['post_tokens'][:i]
-    en_train['rationales'] = en_train['rationales'][:i]
-    hi_train['post_tokens'] = hi_train['post_tokens'][:i]
-    hi_train['rationales'] = torch.squeeze(hi_train['rationales'][:i])
-    en_dev['post_tokens'] = en_dev['post_tokens'][:i]
-    hi_dev['post_tokens'] = hi_dev['post_tokens'][:i]
-
-    # print(hi_train['rationales'][:i].shape)
-
-    en_train['label'] = en_train['label'][:i]
-    hi_train['label'] = hi_train['label'][:i]
-    en_dev['label'] = en_dev['label'][:i]
-    hi_dev['label'] = hi_dev['label'][:i]
-
+    hi_train['rationales'] = torch.squeeze(hi_train['rationales'])
+ 
     en_train_X, en_train_Y = preprocessor(en_train)
     en_dev_X, en_dev_Y = preprocessor(en_dev)
 
