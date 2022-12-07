@@ -11,6 +11,7 @@ from transformers import logging
 from sklearn.utils import class_weight
 import pickle
 logging.set_verbosity_error()
+import sys
 
 torch.manual_seed(42)
 
@@ -118,6 +119,16 @@ class CustomDataLoader():
         dataloader = DataLoader(
             dataset=data, batch_size=self.batch_size, shuffle=True)
         return dataloader
+    def combine(self, en_X, en_Y, hi_X, hi_Y):
+        data = TensorDataset(
+            torch.concat((en_X['input_ids'], hi_X['input_ids'])),
+            torch.concat((en_X['attention_mask'], hi_X['attention_mask'])),
+            torch.concat((en_Y, hi_Y))
+        )
+        dataloader = DataLoader(
+            dataset=data, batch_size=self.batch_size, shuffle=True)
+        return dataloader
+
 
 
 # class model -> model, backward, forward, optimizer, bleh bluh
@@ -138,7 +149,50 @@ class Classifier(nn.Module):
         output = self.model(input_ids, attention_mask)
         return output
 
-    def train(self, train_loader, hparams):
+    def train_without_attention(self, train_loader_without_attention, hparams):
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(
+            self.parameters(),
+            lr=hparams['lr'],
+            betas=(hparams['beta_1'], hparams['beta_2']),
+            eps=1e-08
+        )
+        scheduler = get_linear_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=0,
+            num_training_steps=len(train_loader_without_attention) * hparams['epochs']
+        )
+
+        for epoch in range(hparams['epochs']):
+            for i, (input_ids, attention_mask, labels) in enumerate(tqdm(train_loader_without_attention, desc="minibatches trained on")):
+                input_ids = input_ids.to(DEVICE)
+                attention_mask = attention_mask.to(DEVICE)
+                # rationales = rationales.to(DEVICE)
+                labels = labels.type(torch.LongTensor).to(DEVICE)
+
+                # forward pass
+                output = self.forward(input_ids, attention_mask)
+                #print(output.attentions[-1][:, 0, 0, :])
+                # print(rationales)
+
+                loss = criterion(output.logits.type(
+                    torch.FloatTensor), labels.type(torch.FloatTensor)
+                # ) + hparams['lambda'] * criterion(
+                #     output.attentions[-1][:, 0, 0, :],
+                #     rationales
+                )
+
+                # backward pass
+                optimizer.zero_grad()
+                loss.backward()  # does back prop
+                optimizer.step()
+                scheduler.step()
+
+            print(
+                f'epoch {epoch+1} / {hparams["epochs"]}, loss = {loss.item():.4f}'
+            )
+
+    def train_with_attention(self, train_loader, hparams):
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(
             self.parameters(),
@@ -158,7 +212,7 @@ class Classifier(nn.Module):
                 attention_mask = attention_mask.to(DEVICE)
                 rationales = rationales.to(DEVICE)
                 labels = labels.type(torch.LongTensor).to(DEVICE)
-
+          
                 # forward pass
                 output = self.forward(input_ids, attention_mask)
                 #print(output.attentions[-1][:, 0, 0, :])
@@ -167,9 +221,24 @@ class Classifier(nn.Module):
                 loss = criterion(output.logits.type(
                     torch.FloatTensor), labels.type(torch.FloatTensor)
                 ) + hparams['lambda'] * criterion(
-                    output.attentions[-1][:, 0, 0, :],
-                    rationales
-                )
+                     output.attentions[-1][:, 0, 0, :],
+                     rationales
+                    ) + hparams['lambda'] * criterion(
+                     output.attentions[-1][:, 1, 0, :],
+                     rationales
+                    ) + hparams['lambda'] * criterion(
+                     output.attentions[-1][:, 2, 0, :],
+                     rationales
+                    ) + hparams['lambda'] * criterion(
+                     output.attentions[-1][:, 3, 0, :],
+                     rationales
+                    ) + hparams['lambda'] * criterion(
+                     output.attentions[-1][:, 4, 0, :],
+                     rationales
+                    )+ hparams['lambda'] * criterion(
+                     output.attentions[-1][:, 5, 0, :],
+                     rationales
+                    )
 
                 # backward pass
                 optimizer.zero_grad()
@@ -180,6 +249,7 @@ class Classifier(nn.Module):
             print(
                 f'epoch {epoch+1} / {hparams["epochs"]}, loss = {loss.item():.4f}'
             )
+
 
     def test(self, test_loader):
         classified_correct = 0
@@ -230,14 +300,16 @@ def main():
 
     # hyperparameters
     hparams = {}
-    hparams['epochs'] = 10
-    hparams['batch_size'] = 2
+    hparams['epochs'] = 2
+    hparams['batch_size'] = 32
     hparams['lr'] = 3e-5
     hparams['beta_1'] = 0.9
     hparams['beta_2'] = 0.999
-    hparams['token_length'] = 6
+    hparams['token_length'] = 128
     hparams['lambda'] = 0.001
-
+    hparams['num_heads'] = 6
+    hparams['include_attention'] = False
+    print(hparams['include_attention'])
     checkpoint = 'bert-base-multilingual-cased'
 
     en_train = pickle.load(open('../data/en_train.p', 'rb'))
@@ -257,9 +329,15 @@ def main():
     hi_train_X, hi_train_Y = preprocessor(hi_train)
     hi_dev_X, hi_dev_Y = preprocessor(hi_dev)
 
-    dataloader = CustomDataLoaderWithAttention(hparams['batch_size'])
-    en_train_loader = dataloader.combine(
+    if hparams['include_attention']:
+        dataloader = CustomDataLoaderWithAttention(hparams['batch_size'])
+        en_train_loader = dataloader.combine(
         en_train_X, en_train_Y, hi_train_X, hi_train_Y)
+    else:
+        dataloader = CustomDataLoader(hparams['batch_size'])
+        en_train_loader = dataloader.combine(
+        en_train_X, en_train_Y, hi_train_X, hi_train_Y
+        )
     # hi_train_loader = dataloader(hi_train_X, hi_train_Y)
 
     dataloader = CustomDataLoader(hparams['batch_size'])
@@ -267,7 +345,10 @@ def main():
     hi_dev_loader = dataloader(hi_dev_X, hi_dev_Y)
 
     mbert = Classifier(checkpoint)
-    mbert.train(en_train_loader, hparams)
+    if hparams['include_attention']:
+        mbert.train_with_attention(en_train_loader, hparams)
+    else:
+        mbert.train_without_attention(en_train_loader, hparams)
     # mbert.train(hi_train_loader, hparams)
     accuracy = mbert.test(en_dev_loader)
     accuracy = mbert.test(hi_dev_loader)
